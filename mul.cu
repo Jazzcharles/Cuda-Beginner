@@ -264,6 +264,125 @@ void run_matmul_cublas(){
     free(hc);
 }
 
+//just a demo code, need modification to run.
+//ref: dlsys.cs.washington.edu/pdf/lecture6.pdf
+void run_matmul_partition_cpu(){
+    int n = 10;
+    int t1 = 5;
+    int t2 = 5;
+    int t3 = 5;
+    
+    int a[n][n];
+    int b[n][n];
+    int c[n][n];
+
+    for(int i = 0; i < n; i++){
+        for(int j = 0; j < n; j++){
+            a[i] = rand() * 1.0 / (RAND_MAX);
+            b[i] = rand() * 1.0 / (RAND_MAX);
+            c[i] = 0;
+        }
+    }
+
+    //naive mm
+    //memory --> register load cost: n^3 + n^3
+    //register load cost: 3
+    for(int i = 0; i < n; i++){
+        for(int j = 0; j < n; j++){
+            c[i][j] = 0;
+            for(int k = 0; k < n; k++){
+                c[i][j] += a[i][k] * b[k][j];
+            }
+        }
+    }
+    
+    //output_tiled_mm
+    //memory --> register load cost: n^3 / t1 + n^3 / t2
+    //register load cost: t1*t2 + t1*t3 + t2*t3
+    int A[n / t1][n / t3][t1][t3];
+    int B[n / t3][n / t2][t3][t2];
+    int C[n / t1][n / t2][t1][t2];
+
+    for(int i = 0; i < n / t1; i++){
+        for(int j = 0; j < n / t2; j++){
+            register int c[t1][t2] = 0;
+            for(int k = 0; k < n / t3; k++){
+                register int a[t1][t3] = A[i][k];
+                register int b[t3][t2] = B[k][j];
+                c += dot_product(a, b);
+            }
+            C[i][j] = c;
+        }
+    }
+
+    //cacheline aware tiling
+    //memory --> register load cost: n^2/t1 + n^3/t2
+    //register: t1*n + t2 * n
+    int A[n / t1][t1][n];
+    int B[n / t2][t2][n];
+    int C[n / t1][t1][n / t2][t2];
+    for(int i = 0; i < n / t1; i++){
+        l1cache a[t1][n] = A[i];
+        for(int j = 0; j < n / t2; j++){
+            l1cache b[t2][n] = B[j];
+            c[i][j] = dot(a, b);
+        }
+    }
+
+    //naive combination
+    //(1) cacheline --> (2) output tiling
+    //L1cache tile with (t1, t2)
+    //output tile with (b1, b2), s.t. t1 % b1 == 0, t2 % b2 == 0
+    for(int i = 0; i < n / t1; i++){
+        l1cache a[t1][n] = A[i];
+        for(int j = 0; j < n / t2; j++){
+            l1cache b[t2][n] = B[j];
+            // replace c[i][j] = dot(a, b); with output tiling
+            l1cache c[t1][t2] = 0;
+            for(int x = 0; x < t1 / b1; x++){
+                for(int y = 0; y < t2 / b2; y++){
+                    register int newc[b1][b2] = 0;
+                    for(int z = 0; z < n / b3; z++){
+                        register int newa[b1][b3] = a[x][z];
+                        register int newb[b2][b3] = b[y][z];
+                        newc += dot_product(newa, newb); 
+                    }
+                    c[x][y] = newc;
+                }
+            }
+            C[i][j] = c[t1][t2];
+        }
+    }
+
+    //same way
+    //dram: n^2 + n^3/b1
+    //l1cache: n^3/b1 + n^3/b2
+    int A[n / t1][t1 / b1][n][b1];
+    int B[n / t2][t2 / b2][n][b2];
+    for(int i = 0; i < n / t1; i++){
+        l1cache a[t1 / b1][n][b1] = A[i];
+        for(int j = 0; j < n / t2; j++){
+            l1cache b[t2 / b2][n][b2] = B[j];
+
+            licache c[t1][t2] = 0;
+            for(int x = 0; x < t1 / b1; x++){
+                for(int y = 0; y < t2 / b2; y++){
+                    register int newc[b1][b2] = 0;
+                    for(int k = 0; k < n; k++){
+                        register int newa[b1] = a[x][k];
+                        register int newb[b2] = b[y][k];
+                        newc += dot_product(newa, newb);
+                    }
+                    c[x][y] = newc;
+                }
+            }
+
+            C[i][j] = c[t1][t2];
+        }
+    }
+
+}
+
 int main(){
     run_matmul_partition();
     //run_matmul();
